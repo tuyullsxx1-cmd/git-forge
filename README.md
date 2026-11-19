@@ -1,3 +1,7 @@
+[![make.fun](https://make.fun/badge/github-core-clone-01.svg)](https://make.fun/bounty/github-core-clone-01)
+[![Rank](https://make.fun/badge/github-core-clone-01/tuyullsxx1-cmd/git-forge/rank.svg)](https://make.fun/bounty/github-core-clone-01)
+[![Reward](https://make.fun/badge/github-core-clone-01/tuyullsxx1-cmd/git-forge/reward.svg)](https://make.fun/bounty/github-core-clone-01)
+
 # forge — a GitHub-compatible git forge
 
 A single-process, dependency-free GitHub-compatible server: REST v3,
