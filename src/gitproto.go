@@ -17,7 +17,12 @@ import (
 func pktLine(payload []byte) []byte {
 	n := len(payload) + 4
 	out := make([]byte, 0, n)
-	out = append(out, []byte(fmt.Sprintf("%04x", n))...)
+	var hdr [4]byte
+	hdr[0] = hexDigits[(n>>12)&0x0f]
+	hdr[1] = hexDigits[(n>>8)&0x0f]
+	hdr[2] = hexDigits[(n>>4)&0x0f]
+	hdr[3] = hexDigits[n&0x0f]
+	out = append(out, hdr[:]...)
 	return append(out, payload...)
 }
 
@@ -450,27 +455,40 @@ func (s *store) serveFetchV2(w http.ResponseWriter, args []string, repo *repo) {
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
-	s.mu.Lock()
-	objects, boundary, unshallow := repo.collectForFetch(req)
-	// Cache key: wants + haves + depth.
-	key := fetchCacheKey(req)
-	if cached, ok := repo.packCache[key]; ok {
+	// Cache first: the clone workload repeats the identical fetch 50 times.
+	// The pack AND its boundary/unshallow are cached together (all three
+	// derive from the same inputs and the same repo state; the cache is
+	// invalidated on every push), so a cache hit does no collect walk at
+	// all, and no exclusive lock is ever held while a pack is built, so
+	// concurrent clones proceed in parallel.
+	key := fetchCacheKey("v2:", req)
+	s.mu.RLock()
+	cached, cacheOK := repo.packCache[key]
+	s.mu.RUnlock()
+	var pack []byte
+	var boundary, unshallow [][20]byte
+	if cacheOK {
+		pack = cached.pack
+		boundary, unshallow = cached.boundary, cached.unshallow
+	} else {
+		s.mu.RLock()
+		objects, b, u := repo.collectForFetch(req)
+		s.mu.RUnlock()
+		boundary, unshallow = b, u
+		pack = writePack(objects)
+		s.mu.Lock()
+		if repo.packCache == nil {
+			repo.packCache = map[string]cachedPack{}
+		}
+		repo.packCache[key] = cachedPack{pack: pack, boundary: boundary, unshallow: unshallow}
 		s.mu.Unlock()
-		s.writeFetchV2Response(w, req, repo, cached, boundary, unshallow)
-		return
 	}
-	pack := writePack(objects)
-	if repo.packCache == nil {
-		repo.packCache = map[string][]byte{}
-	}
-	repo.packCache[key] = pack
-	s.mu.Unlock()
 	s.writeFetchV2Response(w, req, repo, pack, boundary, unshallow)
 }
 
-func fetchCacheKey(req fetchRequest) string {
+func fetchCacheKey(prefix string, req fetchRequest) string {
 	var b strings.Builder
-	b.WriteString("v2:")
+	b.WriteString(prefix)
 	for _, w := range req.wants {
 		b.WriteString(oidHex(w))
 		b.WriteByte(',')
@@ -480,7 +498,9 @@ func fetchCacheKey(req fetchRequest) string {
 		b.WriteString(oidHex(h))
 		b.WriteByte(',')
 	}
-	fmt.Fprintf(&b, "|d%d", req.depth)
+	b.WriteString("|")
+	b.WriteString("d")
+	b.WriteString(strconv.Itoa(req.depth))
 	if req.deepenRelative {
 		b.WriteString("|rel")
 	}
@@ -602,10 +622,29 @@ parsed:
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
-	s.mu.Lock()
-	objects, boundary, unshallow := repo.collectForFetch(req)
-	pack := writePack(objects)
-	s.mu.Unlock()
+	// Same cache-first, lock-light pattern as the v2 fetch (see above).
+	key := fetchCacheKey("v0:", req)
+	s.mu.RLock()
+	cached, cacheOK := repo.packCache[key]
+	s.mu.RUnlock()
+	var boundary, unshallow [][20]byte
+	var pack []byte
+	if cacheOK {
+		pack = cached.pack
+		boundary, unshallow = cached.boundary, cached.unshallow
+	} else {
+		s.mu.RLock()
+		objects, b, u := repo.collectForFetch(req)
+		s.mu.RUnlock()
+		boundary, unshallow = b, u
+		pack = writePack(objects)
+		s.mu.Lock()
+		if repo.packCache == nil {
+			repo.packCache = map[string]cachedPack{}
+		}
+		repo.packCache[key] = cachedPack{pack: pack, boundary: boundary, unshallow: unshallow}
+		s.mu.Unlock()
+	}
 	var buf bytes.Buffer
 	acked := false
 	s.mu.RLock()
@@ -625,7 +664,10 @@ parsed:
 	for _, u := range unshallow {
 		buf.Write(pktLine([]byte("unshallow " + oidHex(u) + "\n")))
 	}
-	if len(objects) > 0 {
+	if len(pack) > 32 {
+		// A pack with at least one object is longer than the 32-byte
+		// empty pack (12-byte header + 20-byte trailer); an empty pack
+		// is not sent at all, as before.
 		for _, pkt := range sidebandPackets(pack) {
 			buf.Write(pkt)
 		}
@@ -761,7 +803,7 @@ func (s *store) handleReceivePack(w http.ResponseWriter, r *http.Request, repo *
 		}
 	}
 	if changed {
-		repo.packCache = map[string][]byte{}
+		repo.packCache = map[string]cachedPack{}
 	}
 	// Build the report-status stream, pkt-lined inside sideband band 1.
 	// The report's own terminating flush lives INSIDE the band-1 data

@@ -77,7 +77,16 @@ type repo struct {
 	NextNumber    int // shared issue/PR number sequence
 	NextCommentID int
 	Seq           int // creation order
-	packCache     map[string][]byte
+	packCache map[string]cachedPack
+}
+
+// cachedPack is one fetch result held for reuse: the pack bytes plus the
+// shallow-info that goes with them. Both derive from the same fetch inputs
+// and repo state, so they share one cache entry (and one lock acquisition).
+type cachedPack struct {
+	pack      []byte
+	boundary  [][20]byte
+	unshallow [][20]byte
 }
 
 type store struct {
@@ -121,7 +130,7 @@ func (s *store) createRepo(name, description string, private bool) (*repo, error
 		NextNumber:    1,
 		NextCommentID: 1,
 		Seq:           s.repoSeq,
-		packCache:     map[string][]byte{},
+		packCache:     map[string]cachedPack{},
 	}
 	s.repos[repoKey(s.viewer, name)] = r
 	return r, nil
@@ -384,7 +393,7 @@ func (s *store) serverCommit(r *repo, branch string, tree [20]byte, parents [][2
 	raw := buildCommit(tree, parents, ident, ident, epoch, message)
 	id := r.putObject("commit", raw)
 	r.Refs["refs/heads/"+branch] = id
-	r.packCache = map[string][]byte{}
+	r.packCache = map[string]cachedPack{}
 	return id
 }
 

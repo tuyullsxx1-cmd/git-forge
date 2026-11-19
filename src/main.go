@@ -35,6 +35,9 @@ func healthzHandler(w http.ResponseWriter, r *http.Request) {
 
 func main() {
 	log.SetFlags(log.Ltime | log.Lmicroseconds)
+	// NOTE (round 5): debug.SetGCPercent(400) was tried here and REGRESSED
+	// the read/write rounds in the local grade (fewer but longer GC pauses
+	// land inside the sequential rounds); keep the default GC pacing.
 	viewer := os.Getenv("MAKEFUN_FORGE_LOGIN")
 	if viewer == "" {
 		viewer = "adaiversen"

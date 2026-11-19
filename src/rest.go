@@ -36,11 +36,32 @@ func (s *server) writeJSON(w http.ResponseWriter, status int, v any) {
 		fmt.Fprint(w, `{"message":"internal error"}`)
 		return
 	}
+	s.writeJSONBytes(w, status, body)
+}
+
+// writeJSONBytes answers with a pre-built JSON body (no marshal step).
+func (s *server) writeJSONBytes(w http.ResponseWriter, status int, body []byte) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.Header().Set("X-GitHub-Request-Id", s.nextRequestID())
 	w.WriteHeader(status)
 	w.Write(body)
 }
+
+// jsonBuf builds JSON by hand: no maps, no reflection. Keys are emitted in
+// alphabetical order (the order encoding/json uses for maps), so the bytes
+// match the previous map-based output exactly. String values are escaped
+// with json.Marshal on the string alone, which is encoding/json's own
+// escaping and far cheaper than marshaling a whole value tree.
+type jsonBuf struct {
+	b []byte
+}
+
+func (j *jsonBuf) raw(s string) { j.b = append(j.b, s...) }
+func (j *jsonBuf) str(s string) {
+	esc, _ := json.Marshal(s)
+	j.b = append(j.b, esc...)
+}
+func (j *jsonBuf) num(n int) { j.b = strconv.AppendInt(j.b, int64(n), 10) }
 
 func (s *server) writeErr(w http.ResponseWriter, status int, msg string) {
 	s.writeJSON(w, status, map[string]string{"message": msg})
@@ -159,6 +180,43 @@ func (s *server) repoJSON(r *repo) map[string]any {
 		"archived":       false,
 		"disabled":       false,
 	}
+}
+
+func (s *server) issueJSONBytes(r *repo, it *issue) []byte {
+	var j jsonBuf
+	j.raw(`{"body":`)
+	j.str(it.Body)
+	j.raw(`,"comments":`)
+	j.num(len(it.Comments))
+	j.raw(`,"created_at":"2025-01-01T00:00:00Z","html_url":"","id":`)
+	j.num(it.ID)
+	j.raw(`,"labels":[`)
+	for i, name := range it.Labels {
+		if i > 0 {
+			j.raw(",")
+		}
+		color := "ededed"
+		if l, ok := r.Labels[name]; ok {
+			color = l.Color
+		}
+		j.raw(`{"color":`)
+		j.str(color)
+		j.raw(`,"name":`)
+		j.str(name)
+		j.raw("}")
+	}
+	j.raw(`],"node_id":`)
+	j.str(issueGlobalID(r.ID, it.Number))
+	j.raw(`,"number":`)
+	j.num(it.Number)
+	j.raw(`,"state":`)
+	j.str(it.State)
+	j.raw(`,"title":`)
+	j.str(it.Title)
+	j.raw(`,"updated_at":"2025-01-01T00:00:00Z","user":{"id":1000,"login":`)
+	j.str(s.store.viewer)
+	j.raw(`,"type":"User"}}`)
+	return j.b
 }
 
 func (s *server) issueJSON(r *repo, it *issue) map[string]any {
@@ -862,7 +920,7 @@ func (s *server) handleIssues(w http.ResponseWriter, r *http.Request, repo *repo
 			}
 			it := s.store.createIssue(repo, strField(body, "title"), strField(body, "body"), labels)
 			s.store.mu.Unlock()
-			s.writeJSON(w, http.StatusCreated, s.issueJSON(repo, it))
+			s.writeJSONBytes(w, http.StatusCreated, s.issueJSONBytes(repo, it))
 		default:
 			s.writeErr(w, http.StatusNotFound, "Not Found")
 		}
@@ -883,7 +941,7 @@ func (s *server) handleIssues(w http.ResponseWriter, r *http.Request, repo *repo
 				s.writeErr(w, http.StatusNotFound, "Not Found")
 				return
 			}
-			s.writeJSON(w, http.StatusOK, s.issueJSON(repo, it))
+			s.writeJSONBytes(w, http.StatusOK, s.issueJSONBytes(repo, it))
 		case http.MethodPatch:
 			body, ok := s.readBodyJSON(w, r)
 			if !ok {
@@ -906,7 +964,7 @@ func (s *server) handleIssues(w http.ResponseWriter, r *http.Request, repo *repo
 				it.Body = b
 			}
 			s.store.mu.Unlock()
-			s.writeJSON(w, http.StatusOK, s.issueJSON(repo, it))
+			s.writeJSONBytes(w, http.StatusOK, s.issueJSONBytes(repo, it))
 		default:
 			s.writeErr(w, http.StatusNotFound, "Not Found")
 		}
@@ -1254,7 +1312,7 @@ func (s *server) handleGitRefs(w http.ResponseWriter, r *http.Request, repo *rep
 				return
 			}
 			repo.Refs[ref] = id
-			repo.packCache = map[string][]byte{}
+			repo.packCache = map[string]cachedPack{}
 			s.store.mu.Unlock()
 			s.writeJSON(w, http.StatusCreated, map[string]any{
 				"ref":    ref,

@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"sort"
+	"strconv"
 )
 
 // Git object type numbers (packfile).
@@ -60,16 +61,31 @@ func objTypeName(n int) string {
 }
 
 // hashObject returns the SHA-1 id of "<type> <len>\0<data>".
+// Written without fmt: this is called for every object stored or read.
 func hashObject(typ string, data []byte) [20]byte {
 	h := sha1.New()
-	fmt.Fprintf(h, "%s %d\x00", typ, len(data))
+	h.Write([]byte(typ))
+	h.Write([]byte(" "))
+	var num [20]byte
+	h.Write(strconv.AppendInt(num[:0], int64(len(data)), 10))
+	h.Write([]byte{0})
 	h.Write(data)
 	var id [20]byte
-	copy(id[:], h.Sum(nil))
+	h.Sum(id[:0])
 	return id
 }
 
-func oidHex(id [20]byte) string { return fmt.Sprintf("%x", id[:]) }
+const hexDigits = "0123456789abcdef"
+
+// oidHex renders an oid as 40 lowercase hex chars, without fmt.Sprintf.
+func oidHex(id [20]byte) string {
+	var buf [40]byte
+	for i, b := range id {
+		buf[2*i] = hexDigits[b>>4]
+		buf[2*i+1] = hexDigits[b&0x0f]
+	}
+	return string(buf[:])
+}
 
 func parseOIDHex(s string) ([20]byte, bool) {
 	var id [20]byte
@@ -348,8 +364,9 @@ func applyDelta(base, delta []byte) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	var out bytes.Buffer
-	out.Grow(int(resultSize))
+	// Write straight into the final slice: the result size is known up
+	// front, so no buffer growth or copy is needed.
+	out := make([]byte, 0, resultSize)
 	for pos < len(delta) {
 		op := delta[pos]
 		pos++
@@ -380,22 +397,22 @@ func applyDelta(base, delta []byte) ([]byte, error) {
 			if off+size > int64(len(base)) {
 				return nil, errors.New("delta copy out of range")
 			}
-			out.Write(base[off : off+size])
+			out = append(out, base[off:off+size]...)
 		} else if op != 0 {
 			n := int(op)
 			if pos+n > len(delta) {
 				return nil, errors.New("delta insert truncated")
 			}
-			out.Write(delta[pos : pos+n])
+			out = append(out, delta[pos:pos+n]...)
 			pos += n
 		} else {
 			return nil, errors.New("delta opcode 0")
 		}
 	}
-	if int64(out.Len()) != resultSize {
-		return nil, fmt.Errorf("delta result size %d != %d", out.Len(), resultSize)
+	if int64(len(out)) != resultSize {
+		return nil, fmt.Errorf("delta result size %d != %d", len(out), resultSize)
 	}
-	return out.Bytes(), nil
+	return out, nil
 }
 
 // --- tree / commit builders (mirrors the kit's git-client helpers) ---
@@ -406,7 +423,10 @@ func buildTree(entries []treeEntry) []byte {
 	sort.Slice(entries, func(i, j int) bool { return treeSortKey(entries[i]) < treeSortKey(entries[j]) })
 	var buf bytes.Buffer
 	for _, e := range entries {
-		fmt.Fprintf(&buf, "%s %s\x00", e.mode, e.name)
+		buf.WriteString(e.mode)
+		buf.WriteByte(' ')
+		buf.WriteString(e.name)
+		buf.WriteByte(0)
 		buf.Write(e.oid[:])
 	}
 	return buf.Bytes()
@@ -451,12 +471,25 @@ func parseTree(data []byte) ([]treeEntry, error) {
 // buildCommit encodes a commit object.
 func buildCommit(tree [20]byte, parents [][20]byte, author, committer string, epochSec int64, message string) []byte {
 	var buf bytes.Buffer
-	fmt.Fprintf(&buf, "tree %s\n", oidHex(tree))
+	buf.WriteString("tree ")
+	buf.WriteString(oidHex(tree))
+	buf.WriteByte('\n')
 	for _, p := range parents {
-		fmt.Fprintf(&buf, "parent %s\n", oidHex(p))
+		buf.WriteString("parent ")
+		buf.WriteString(oidHex(p))
+		buf.WriteByte('\n')
 	}
-	fmt.Fprintf(&buf, "author %s %d +0000\n", author, epochSec)
-	fmt.Fprintf(&buf, "committer %s %d +0000\n", committer, epochSec)
+	var num [20]byte
+	buf.WriteString("author ")
+	buf.WriteString(author)
+	buf.WriteByte(' ')
+	buf.Write(strconv.AppendInt(num[:0], epochSec, 10))
+	buf.WriteString(" +0000\n")
+	buf.WriteString("committer ")
+	buf.WriteString(committer)
+	buf.WriteByte(' ')
+	buf.Write(strconv.AppendInt(num[:0], epochSec, 10))
+	buf.WriteString(" +0000\n")
 	buf.WriteString("\n")
 	buf.WriteString(message)
 	return buf.Bytes()
