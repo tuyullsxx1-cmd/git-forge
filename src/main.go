@@ -45,27 +45,6 @@ func main() {
 	token := os.Getenv("MAKEFUN_SHOP_TOKEN")
 	srv := &server{store: newStore(viewer), token: token}
 
-	mux := http.NewServeMux()
-	mux.HandleFunc("/healthz", healthzHandler)
-	mux.HandleFunc("/api/v3", srv.restHandler)
-	mux.HandleFunc("/api/v3/", srv.restHandler)
-	mux.HandleFunc("/api/graphql", srv.graphqlHandler)
-	mux.HandleFunc("/mcp", srv.mcpHandler)
-	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		// Only /{owner}/{repo}.git/* reaches the git handler; anything else
-		// is an unknown route and answers JSON 404.
-		path := strings.TrimPrefix(r.URL.Path, "/")
-		parts := strings.SplitN(path, "/", 3)
-		if len(parts) >= 2 && strings.HasSuffix(parts[1], ".git") {
-			srv.store.gitHandler(w, r)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		w.Header().Set("X-GitHub-Request-Id", srv.nextRequestID())
-		w.WriteHeader(http.StatusNotFound)
-		fmt.Fprint(w, `{"message":"Not Found"}`)
-	})
-
 	addr := "127.0.0.1:0"
 	if p := os.Getenv("FORGE_PORT"); p != "" {
 		addr = "127.0.0.1:" + p
@@ -77,12 +56,10 @@ func main() {
 	port := ln.Addr().(*net.TCPAddr).Port
 	log.Printf("forge: viewer=%s listening on 127.0.0.1:%d", viewer, port)
 
-	httpServer := &http.Server{Handler: mux, ReadHeaderTimeout: 30 * time.Second}
-	go func() {
-		if err := httpServer.Serve(ln); err != nil && err != http.ErrServerClosed {
-			log.Printf("serve error: %v", err)
-		}
-	}()
+	// Round 6: the net/http server + ServeMux are replaced by the
+	// hand-rolled TCP server in tcpserver.go (same handlers, same routes,
+	// byte-identical responses). Routing lives in tcpServer.dispatch.
+	go serveTCP(ln, srv)
 
 	envURL := strings.TrimSuffix(os.Getenv("MAKEFUN_ENV_URL"), "/")
 	if envURL == "" {
